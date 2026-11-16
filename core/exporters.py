@@ -1,0 +1,193 @@
+"""보고서·계획서·원고 내보내기: Word(.docx), 한글(.hwpx), 결과표(Excel·CSV).
+
+모든 형식이 같은 blocks 목록에서 만들어지므로 내용과 참고문헌이 서로 달라지지 않는다 (REPORT-04).
+block = (kind, text)  kind: title | meta | h | p | b(굵은 머리말+본문은 'label|text')
+"""
+from __future__ import annotations
+
+import io
+import time
+from pathlib import Path
+from xml.sax.saxutils import escape
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
+
+from .cite import format_citation
+from .store import safe_cell
+
+TPL = Path(__file__).parent / "hwpx_tpl"
+THREE = ["기여", "증명방법", "검증 범위"]
+
+
+def report_fields(proj: dict, pid: str) -> dict:
+    """A4 보고서의 편집 가능한 칸. 사용자가 고친 값(edited)이 있으면 그것을, 없으면 AI 초안을 쓴다."""
+    note = proj["notes"].get(pid, {})
+    ed = note.get("edited", {})
+    s6 = {k: (v or {}).get("text", "") for k, v in ((note.get("summary6") or {}).get("data") or {}).get("items", {}).items()}
+    m = note.get("method") or {}
+    sec = {k: (v or {}).get("text", "") for k, v in (m.get("sections") or {}).items()}
+    three = m.get("three_lines") or {}
+    ai = {
+        "overview": " ".join(x for x in (s6.get("주제", ""), s6.get("목적", "")) if x),
+        "tech": " ".join(x for x in (s6.get("다룬 기술", ""), s6.get("활용 분야", "")) if x),
+        "contribution": three.get("기여", "") or sec.get("연구 기여도", ""),
+        "proof": three.get("증명방법", "") or sec.get("연구방법·증명방법", ""),
+        "scope": three.get("검증 범위", ""),
+        "limits": sec.get("한계", "") or s6.get("주요 한계", ""),
+    }
+    out = {k: ed.get(k, v) for k, v in ai.items()}
+    out["_ai"] = ai
+    out["reason"] = note.get("selection_reason", "")
+    out["extra_limits"] = note.get("extra_limits", "")
+    out["thoughts"] = note.get("my_thoughts", "")
+    return out
+
+
+def report_blocks(proj: dict, pid: str, replicated: bool = False) -> list[tuple[str, str]]:
+    f = report_fields(proj, pid)
+    c = proj["project"]["cover"]
+    cover = " · ".join(x for x in (c.get("school"), c.get("major"), c.get("course"), c.get("name"), c.get("date")) if x)
+    need = "[작성 필요]"
+    blocks = [("title", "논문 요약 보고서"), ("meta", cover or "[표지 정보 미입력]"),
+              ("h", "1. 서지정보"), ("p", format_citation(proj["papers"][pid])),
+              ("h", "2. 선정 이유"), ("p", f["reason"] or need),
+              ("h", "3. 연구 개요"), ("p", f["overview"] or need),
+              ("h", "4. 활용 기술·분석 대상"), ("p", f["tech"] or need),
+              ("h", "5. 연구 기여도와 증명방법 (핵심 3줄)"),
+              ("b", f"기여|{f['contribution'] or need}"), ("b", f"증명방법|{f['proof'] or need}"), ("b", f"검증 범위|{f['scope'] or need}"),
+              ("h", "6. 한계"), ("b", f"논문에 명시된 한계|{f['limits'] or need}"),
+              ("b", f"내가 추가로 검토할 점|{f['extra_limits'] or need}"),
+              ("h", "7. 나의 생각·의문"), ("p", f["thoughts"] or need)]
+    if not replicated:
+        blocks.append(("meta", "※ 이 보고서는 논문을 읽고 정리한 것이며, 논문의 방법을 직접 재현·실험한 결과는 포함하지 않습니다."))
+    return blocks
+
+
+def char_count(blocks) -> int:
+    return sum(len(t.replace("|", " ")) for _, t in blocks)
+
+
+# ---------- Word ----------
+def to_docx(blocks, font: str = "맑은 고딕") -> bytes:
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.shared import Mm, Pt
+
+    doc = Document()
+    sec = doc.sections[0]
+    sec.page_width, sec.page_height = Mm(210), Mm(297)
+    sec.left_margin = sec.right_margin = Mm(25)
+    sec.top_margin = sec.bottom_margin = Mm(20)
+    style = doc.styles["Normal"]
+    style.font.name, style.font.size = font, Pt(10.5)
+    style.element.rPr.rFonts.set(qn("w:eastAsia"), font)
+
+    def para(text="", size=10.5, bold=False, align=None, after=4):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(after)
+        p.paragraph_format.space_before = Pt(0)
+        if align:
+            p.alignment = align
+        if text:
+            r = p.add_run(text)
+            r.font.size, r.bold = Pt(size), bold
+            r.font.name = font
+            r._element.rPr.rFonts.set(qn("w:eastAsia"), font)
+        return p
+
+    for kind, text in blocks:
+        if kind == "title":
+            para(text, 16, True, WD_ALIGN_PARAGRAPH.CENTER, 6)
+        elif kind == "meta":
+            para(text, 9, False, WD_ALIGN_PARAGRAPH.CENTER, 8)
+        elif kind == "h":
+            para(text, 11.5, True, after=3).paragraph_format.space_before = Pt(8)
+        elif kind == "b":
+            label, _, body = text.partition("|")
+            p = para(after=3)
+            for t, b in ((label + ": ", True), (body, False)):
+                r = p.add_run(t)
+                r.bold, r.font.size, r.font.name = b, Pt(10.5), font
+                r._element.rPr.rFonts.set(qn("w:eastAsia"), font)
+        else:
+            for line in text.split("\n"):
+                para(line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ---------- 한글 HWPX ----------
+def _hp(pid: int, text: str, para_pr: int, char_pr: int) -> str:
+    body = f"<hp:t>{escape(text)}</hp:t>" if text else "<hp:t/>"
+    return (f'<hp:p id="{pid}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+            f'<hp:run charPrIDRef="{char_pr}">{body}</hp:run></hp:p>')
+
+
+def _hp_runs(pid: int, runs: list[tuple[str, int]], para_pr: int = 0) -> str:
+    inner = "".join(f'<hp:run charPrIDRef="{c}"><hp:t>{escape(t)}</hp:t></hp:run>' for t, c in runs if t)
+    return f'<hp:p id="{pid}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">{inner}</hp:p>'
+
+
+def to_hwpx(blocks, title: str = "논문 요약 보고서") -> bytes:
+    """보고서 양식 header(글자: 12=16pt 굵게, 13=12pt 굵게, 9=10pt 굵게, 11=9pt / 문단: 20=가운데, 27=구획 머리말)를 쓴다."""
+    base = (TPL / "Contents" / "section0.xml").read_text(encoding="utf-8")
+    head, tail = base.rsplit("</hs:sec>", 1)
+    out, pid = [], 1000000001
+    for kind, text in blocks:
+        if kind == "title":
+            out.append(_hp(pid, text, 20, 12))
+        elif kind == "meta":
+            out.append(_hp(pid, text, 20, 11))
+        elif kind == "h":
+            out.append(_hp(pid, text, 27, 13))
+        elif kind == "b":
+            label, _, body = text.partition("|")
+            out.append(_hp_runs(pid, [(label + ": ", 9), (body, 0)]))
+        else:
+            for line in text.split("\n"):
+                out.append(_hp(pid, line, 0, 0))
+                pid += 1
+        pid += 1
+    section = head + "".join(out) + "</hs:sec>" + tail
+    hpf = (TPL / "Contents" / "content.hpf").read_text(encoding="utf-8").replace("<opf:title/>", f"<opf:title>{escape(title)}</opf:title>")
+    buf = io.BytesIO()
+    with ZipFile(buf, "w", ZIP_DEFLATED) as zf:
+        zf.write(TPL / "mimetype", "mimetype", compress_type=ZIP_STORED)
+        for path in sorted(TPL.rglob("*")):
+            rel = path.relative_to(TPL).as_posix()
+            if not path.is_file() or rel == "mimetype":
+                continue
+            if rel == "Contents/section0.xml":
+                zf.writestr(rel, section)
+            elif rel == "Contents/content.hpf":
+                zf.writestr(rel, hpf)
+            elif rel == "Preview/PrvText.txt":
+                zf.writestr(rel, "\n".join(t.replace("|", ": ") for _, t in blocks)[:1000])
+            else:
+                zf.write(path, rel)
+    return buf.getvalue()
+
+
+# ---------- 표 ----------
+def to_xlsx(sheets: dict[str, list[dict]]) -> bytes:
+    import pandas as pd
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, rows in sheets.items():
+            df = pd.DataFrame(rows if rows else [{"안내": "자료 없음"}])
+            df = df.map(lambda v: safe_cell(v if isinstance(v, (str, int, float, type(None))) else str(v)))
+            df.to_excel(xw, sheet_name=name[:31], index=False)
+    return buf.getvalue()
+
+
+def to_csv(rows: list[dict]) -> bytes:
+    import pandas as pd
+
+    df = pd.DataFrame(rows).map(lambda v: safe_cell(v if isinstance(v, (str, int, float, type(None))) else str(v)))
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def stamp() -> str:
+    return time.strftime("%Y%m%d_%H%M")
