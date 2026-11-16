@@ -11,6 +11,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
+from . import reporttpl
 from .cite import format_citation
 from .store import safe_cell
 
@@ -42,21 +43,50 @@ def report_fields(proj: dict, pid: str) -> dict:
     return out
 
 
+def _sec_blocks(sec: str, proj: dict, pid: str, f: dict) -> list[tuple[str, str]]:
+    need = "[작성 필요]"
+    note = proj["notes"].get(pid, {})
+    if sec == "cite":
+        return [("p", format_citation(proj["papers"][pid]))]
+    if sec == "reason":
+        return [("p", f["reason"] or need)]
+    if sec == "overview":
+        return [("p", f["overview"] or need)]
+    if sec == "tech":
+        return [("p", f["tech"] or need)]
+    if sec == "three":
+        return [("b", f"기여|{f['contribution'] or need}"), ("b", f"증명방법|{f['proof'] or need}"), ("b", f"검증 범위|{f['scope'] or need}")]
+    if sec == "limits":
+        return [("b", f"논문에 명시된 한계|{f['limits'] or need}"), ("b", f"내가 추가로 검토할 점|{f['extra_limits'] or need}")]
+    if sec == "thoughts":
+        return [("p", f["thoughts"] or need)]
+    if sec == "s7":
+        from .ai import SEVEN
+        items = ((note.get("summary7") or {}).get("data") or {}).get("items") or {}
+        if not items:
+            return [("p", "[7문장 요약 작성 필요]")]
+        return [("b", f"{k}|{(items.get(k) or {}).get('text') or need}") for k in SEVEN]
+    if sec == "replication":
+        rp = (note.get("method") or {}).get("replication") or {}
+        return [("b", f"{k}|{v or need}") for k, v in rp.items()] or [("p", "[따라 해 보기 검토 작성 필요]")]
+    return []
+
+
+def report_tpl(proj: dict) -> dict:
+    tpl = proj["project"].get("report_tpl")
+    return tpl if reporttpl.valid(tpl) else reporttpl.default_tpl()
+
+
 def report_blocks(proj: dict, pid: str, replicated: bool = False) -> list[tuple[str, str]]:
+    """선택한 양식(항목·순서·제목)대로 보고서를 만든다. 번호는 켜진 항목 순서로 다시 매긴다."""
     f = report_fields(proj, pid)
+    tpl = report_tpl(proj)
     c = proj["project"]["cover"]
     cover = " · ".join(x for x in (c.get("school"), c.get("major"), c.get("course"), c.get("name"), c.get("date")) if x)
-    need = "[작성 필요]"
-    blocks = [("title", "논문 요약 보고서"), ("meta", cover or "[표지 정보 미입력]"),
-              ("h", "1. 서지정보"), ("p", format_citation(proj["papers"][pid])),
-              ("h", "2. 선정 이유"), ("p", f["reason"] or need),
-              ("h", "3. 연구 개요"), ("p", f["overview"] or need),
-              ("h", "4. 활용 기술·분석 대상"), ("p", f["tech"] or need),
-              ("h", "5. 연구 기여도와 증명방법 (핵심 3줄)"),
-              ("b", f"기여|{f['contribution'] or need}"), ("b", f"증명방법|{f['proof'] or need}"), ("b", f"검증 범위|{f['scope'] or need}"),
-              ("h", "6. 한계"), ("b", f"논문에 명시된 한계|{f['limits'] or need}"),
-              ("b", f"내가 추가로 검토할 점|{f['extra_limits'] or need}"),
-              ("h", "7. 나의 생각·의문"), ("p", f["thoughts"] or need)]
+    blocks = [("title", (tpl.get("title") or "").strip() or "논문 요약 보고서"), ("meta", cover or "[표지 정보 미입력]")]
+    for i, sec in enumerate([s for s in tpl["sections"] if s.get("on")], start=1):
+        blocks.append(("h", f"{i}. {(sec.get('label') or '').strip() or reporttpl.SEC_DEF[sec['id']]}"))
+        blocks += _sec_blocks(sec["id"], proj, pid, f)
     if not replicated:
         blocks.append(("meta", "※ 이 보고서는 논문을 읽고 정리한 것이며, 논문의 방법을 직접 재현·실험한 결과는 포함하지 않습니다."))
     return blocks

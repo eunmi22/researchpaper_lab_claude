@@ -6,6 +6,8 @@ import json
 import re
 import time
 
+from . import reporttpl
+
 from .version import APP_VERSION, SCHEMA_VERSION
 
 SECRET_PATTERNS = [re.compile(r"sk-[A-Za-z0-9_\-]{16,}"), re.compile(r"(?i)(api[_-]?key|servicekey|authorization)\s*[=:]\s*\S{12,}")]
@@ -15,7 +17,8 @@ def new_project() -> dict:
     return {
         "schema_version": SCHEMA_VERSION, "app_version": APP_VERSION, "created": time.strftime("%Y-%m-%d %H:%M"),
         "project": {"topic": "", "purpose": "", "period": "", "resources": "", "advisor": "",
-                    "cover": {"school": "", "major": "", "course": "", "name": "", "date": ""}},
+                    "cover": {"school": "", "major": "", "course": "", "name": "", "date": ""},
+                    "report_tpl": reporttpl.default_tpl()},
         "papers": {},        # paper_id → 서지
         "docs": {},          # paper_id → 원문 메타(본문 텍스트는 내보내지 않음)
         "notes": {},         # paper_id → 읽기노트
@@ -28,7 +31,12 @@ def new_project() -> dict:
 
 def empty_note() -> dict:
     return {"abstract": "", "summary6": {}, "summary7": {}, "method": {}, "ai_questions": [], "edited": {},
-            "my_thoughts": "", "selection_reason": "", "extra_limits": "", "read_state": "읽기 전", "source_scope": ""}
+            "my_thoughts": "", "selection_reason": "", "extra_limits": "", "read_state": "읽기 전", "source_scope": "",
+            "page_notes": {}, "memos": {}, "chat": [], "questions3": {}}
+
+
+def store_note_defaults() -> dict:
+    return empty_note()
 
 
 def redact(text: str) -> str:
@@ -70,6 +78,12 @@ def import_project(raw: bytes) -> tuple[dict, list[str]]:
             notes.append(f"'{key}' 항목이 없어 빈 값으로 채웠습니다.")
     for k, v in base["eval"].items():
         data["eval"].setdefault(k, v)
+    if not reporttpl.valid(data["project"].get("report_tpl")):
+        data["project"]["report_tpl"] = reporttpl.default_tpl()
+    for note in data["notes"].values():
+        if isinstance(note, dict):
+            for k, v in store_note_defaults().items():
+                note.setdefault(k, v)
     if data.get("docs"):
         notes.append("원문 PDF는 프로젝트 파일에 들어 있지 않습니다. 02 메뉴에서 같은 PDF를 다시 올려 주세요.")
     data["schema_version"] = SCHEMA_VERSION

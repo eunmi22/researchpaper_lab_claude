@@ -1,11 +1,11 @@
 """화면 흐름 시험 (Streamlit AppTest). 외부 호출은 모두 가짜로 바꾼다."""
-import pytest
 from streamlit.testing.v1 import AppTest
 
 from core import ai, nanet, pdfio
 from tests import sample as S
 
 APP = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "app.py")
+SUGGEST_FIRST = "이 논문의 연구 방법을 단계별로 쉽게 설명해 줘"
 PDF = "/mnt/user-data/uploads/167e4573-Amazon_RDS_______.pdf"
 
 
@@ -80,7 +80,14 @@ def test_zero_results_is_not_error(monkeypatch):
     assert not at.error and any("0건입니다" in i.value for i in at.info)
 
 
-def _fake_ai(task):
+def _fake_ai(task, material=""):
+    if task == "pages":
+        import re
+        ns = [int(n) for n in re.findall(r"\[PDF p\.(\d+)\]", material)]
+        return {"pages": [{"page": n, "kind": "표지·목차" if n < 10 else "본문", "summary": f"p{n} 요약", "terms": ["용어"],
+                           "question": "" if n < 10 else f"질문{n}", "quote": ""} for n in ns]}
+    if task == "questions":
+        return {"선정 이유": [{"q": "선정 질문", "pages": [19]}], "생각과 의문": [{"q": "의문 질문", "pages": [24]}], "추가 검토점": ["검토 질문"]}
     item = {"text": "클라우드 DB 포렌식 절차를 제안한다.", "pages": [5], "quote": "대규모 클라우드 DB에 대한 디지털포렌식 기법은 아직 정립되지 않았다"}
     return {"summary6": {"items": {k: dict(item) for k in ai.SIX}},
             "method": {"sections": {"한계": {"text": "삭제 레코드 복구는 할 수 없다.", "pages": [1], "quote": "원문에 없는 지어낸 근거 문구입니다"}},
@@ -102,11 +109,12 @@ def test_read_report_flow_with_real_pdf(monkeypatch):
     assert m["PDF 전체"] == "46쪽" and m["AI에 전부 전송"] == "46쪽"
     # 키가 없으면 AI 버튼은 꺼져 있고 안내가 나온다
     assert next(b for b in at.button if b.label == "6항목 요약 만들기").disabled
-    sent = {}
+    sent, sent_all = {}, []
 
     def fake(api_key, model, task, material, extra=""):
         sent[task] = material
-        return {"generation_id": "gen_" + task, "task": task, "model": model, "prompt_version": "p1", "data": _fake_ai(task), "created": "t", "usage": {}}
+        sent_all.append((task, material))
+        return {"generation_id": "gen_" + task, "task": task, "model": model, "prompt_version": "p1", "data": _fake_ai(task, material), "created": "t", "usage": {}}
 
     monkeypatch.setattr(ai, "run_task", fake)
     at.text_input(key="openai_key").set_value("sk-test-key-for-ui").run()
@@ -121,6 +129,44 @@ def test_read_report_flow_with_real_pdf(monkeypatch):
     next(t for t in at.text_area if t.label.startswith("이 논문을 읽고")).set_value("로그가 꺼져 있었다면 누가 했는지 어떻게 밝히나?").run()
     note = at.session_state.proj["notes"][pid]
     assert note["my_thoughts"].startswith("로그가") and "sk-test" not in str(at.session_state.proj)
+    # 쪽별 요약: 6쪽씩 나눠 요청하고, 본문 쪽만 카드로 보이며, 메모를 '생각과 의문'으로 모은다
+    click(at, "쪽별 요약 만들기")
+    assert not errors(at) and len(note["page_notes"]) == 46
+    chunks = [len(__import__("re").findall(r"\[PDF p\.\d+\]", m)) for t, m in sent_all if t == "pages"]
+    assert max(chunks) <= 6 and sum(chunks) == 46
+    memo = next(t for t in at.text_area if t.label == "p.24을 읽고 든 생각")
+    assert len([t for t in at.text_area if t.label.endswith("을 읽고 든 생각")]) == 37  # 표지·목차 9쪽은 메모 칸 없음
+    memo.set_value("로그 끄는 행위는 CloudTrail에 남나?").run()
+    click(at, "쪽별 메모를 ‘생각과 의문’에 모으기")
+    th = next(t for t in at.text_area if t.label.startswith("이 논문을 읽고")).value
+    assert th.startswith("로그가") and "[p.24] 로그 끄는 행위는 CloudTrail에 남나?" in th and note["my_thoughts"] == th
+    click(at, "쪽별 메모를 ‘생각과 의문’에 모으기")
+    assert next(t for t in at.text_area if t.label.startswith("이 논문을 읽고")).value.count("[p.24]") == 1  # 두 번 모아도 중복 없음
+    # 질문 예시: 쪽별 요약을 근거로 세 칸에 나눠 붙는다
+    click(at, "질문 예시 받기")
+    assert sent_all[-1][1].startswith("[쪽별 요약]")
+    md = " ".join(x.value for x in at.markdown)
+    assert "선정 질문" in md and "의문 질문" in md and "검토 질문" in md and note["selection_reason"] == ""
+    # 논문에 질문하기
+    chat_calls = []
+
+    def fake_chat(api_key, model, material, history):
+        chat_calls.append(history)
+        return {"text": "표 2는 비교표입니다 [p.19].", "model": model, "created": "t"}
+
+    monkeypatch.setattr(ai, "run_chat", fake_chat)
+    next(t for t in at.text_area if t.label == "질문").set_value("표 2를 쉽게 설명해 줘")
+    click(at, "질문 보내기")
+    assert not errors(at) and chat_calls[0][-1] == {"role": "user", "content": "표 2를 쉽게 설명해 줘"}
+    assert [m["role"] for m in note["chat"]] == ["user", "assistant"]
+    assert any(":blue-badge[p.19]" in x.value for x in at.markdown)
+    click(at, SUGGEST_FIRST)
+    assert len(note["chat"]) == 4 and len(chat_calls[1]) == 3
+    # 보고서 양식: '간단'으로 바꾸면 세 항목만, 번호를 다시 매긴다
+    next(s_ for s_ in at.selectbox if s_.label == "양식").set_value("간단").run()
+    heads = [x.value for x in at.markdown if x.value.startswith("**") and ". " in x.value]
+    assert "**1. 서지정보**" in heads and "**2. 연구 기여도와 증명방법 (핵심 3줄)**" in heads and "**3. 나의 생각·의문**" in heads
+    assert not any(t.label == "연구 개요" for t in at.text_area)
     md = " ".join(x.value for x in at.markdown)
     assert "절차를 제안했다." in md and "단계별 비교와 사례 구체화." in md
     assert not [b for b in at.get("download_button") if "docx" in str(b.proto.label).lower() or "Word" in b.proto.label]  # 최종 검토 전에는 내려받기 없음

@@ -45,6 +45,8 @@ with st.sidebar:
             try:
                 ss.proj, notes = store.import_project(up.getvalue())
                 ss.texts, ss.run = {}, None
+                for k in [k for k in ss if isinstance(k, str) and k.startswith(("th_", "reason_", "extra_", "memo_", "tpl_"))]:
+                    del ss[k]
                 ss._import_notes = notes
                 st.rerun()
             except store.ImportError_ as exc:

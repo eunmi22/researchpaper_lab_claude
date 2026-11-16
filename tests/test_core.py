@@ -287,3 +287,34 @@ def test_uploaded_cases_validated():
     ok, problems = evalq.validate_cases([{"response": "답", "reference": "기준", "review_state": "검토 완료", "provided_contexts": "문단1||문단2"},
                                          {"reference": "답변 없음"}, "문자열"])
     assert len(ok) == 1 and len(problems) == 2 and ok[0]["provided_contexts"] == ["문단1", "문단2"] and ok[0]["review_state"] == "검토 완료"
+
+
+def test_report_template_order_labels_and_sections():
+    from core import reporttpl
+    p, pid = _project_with_paper()
+    p["notes"][pid]["summary7"] = {"data": {"items": {"연구 배경": {"text": "배경 문장."}}}}
+    tpl = p["project"]["report_tpl"]
+    assert [b[1] for b in exporters.report_blocks(p, pid) if b[0] == "h"][1] == "2. 선정 이유"
+    tpl["sections"] = reporttpl.preset_sections("상세", tpl["sections"])
+    tpl["title"] = "Deep Dive Topic 보고서"
+    tpl["sections"][0]["label"] = "참고 논문"
+    blocks = exporters.report_blocks(p, pid)
+    heads = [t for k, t in blocks if k == "h"]
+    assert blocks[0] == ("title", "Deep Dive Topic 보고서") and heads[0] == "1. 참고 논문" and heads[2] == "3. 논문 요약 (7문장)"
+    assert ("b", "연구 배경|배경 문장.") in blocks and ("b", "연구 질문|[작성 필요]") in blocks
+    assert any(t == "[따라 해 보기 검토 작성 필요]" for _, t in blocks)
+    tpl["sections"] = reporttpl.preset_sections("간단", tpl["sections"])
+    heads = [t for k, t in exporters.report_blocks(p, pid) if k == "h"]
+    assert heads == ["1. 참고 논문", "2. 연구 기여도와 증명방법 (핵심 3줄)", "3. 나의 생각·의문"]  # 바꾼 제목은 양식을 바꿔도 유지
+    p["project"]["report_tpl"] = {"sections": "깨진 값"}
+    assert [t for k, t in exporters.report_blocks(p, pid) if k == "h"][0] == "1. 서지정보"  # 잘못된 양식은 기본으로
+
+
+def test_old_project_file_gets_new_fields():
+    p, pid = _project_with_paper()
+    raw = json.loads(store.export_project(p))
+    del raw["project"]["report_tpl"]
+    for k in ("page_notes", "memos", "chat", "questions3"):
+        raw["notes"][pid].pop(k, None)
+    back, _ = store.import_project(json.dumps(raw).encode())
+    assert back["project"]["report_tpl"]["preset"] == "기본" and back["notes"][pid]["chat"] == [] and back["notes"][pid]["page_notes"] == {}
