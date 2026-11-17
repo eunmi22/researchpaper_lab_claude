@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 from .nanet import ARTICLE, BOOK, THESIS
 
 FIX_FIELDS = ["title", "author", "publisher", "year", "month", "degree", "journal", "volume", "issue", "pages", "doi"]

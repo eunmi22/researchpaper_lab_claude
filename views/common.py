@@ -1,6 +1,8 @@
 """화면 공통 도우미."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import os
 
 import streamlit as st
@@ -62,10 +64,34 @@ def run_ai(task: str, material: str, extra: str = "", pid: str = "", context: di
     except ai.AIError as exc:
         st.error(str(exc))
         return None
+    except KeyError:
+        st.error(f"앱 파일이 서로 다른 버전으로 섞여 있어 ‘{task}’ 기능을 실행하지 못했습니다. "
+                 "GitHub에 새 압축 파일의 모든 파일을 올린 뒤 Streamlit 화면 오른쪽 아래 Manage app → Reboot app을 눌러 주세요.")
+        return None
+    except Exception as exc:  # 예상하지 못한 오류로 화면 전체가 멈추지 않게 한다
+        st.error(f"AI 결과를 처리하지 못했습니다 ({type(exc).__name__}). 다시 눌러 보고, 계속되면 관리자에게 알려 주세요.")
+        return None
     gen.update({"paper_id": pid, "context": context or {}})
     proj()["generations"].append({k: v for k, v in gen.items()})
     store.log(proj(), f"AI 실행: {task} ({gen['model']})")
     return gen
+
+
+def run_prompt(system: str, prompt: str, task: str, spinner: str = "AI가 생각하고 있습니다…", pid: str = "") -> dict | None:
+    """튜터·작성 보조·연구 설계안용. 실패하면 안내만 하고 None. 결과 dict(data)만 돌려준다."""
+    try:
+        with st.spinner(spinner):
+            gen = ai.run_prompt(st.session_state.get("openai_key", ""), st.session_state.get("ai_model", ai.MODELS[0]), system, prompt, task)
+    except ai.AIError as exc:
+        st.error(str(exc))
+        return None
+    except Exception as exc:
+        st.error(f"AI 결과를 처리하지 못했습니다 ({type(exc).__name__}). 다시 눌러 보고, 계속되면 관리자에게 알려 주세요.")
+        return None
+    gen.update({"paper_id": pid, "context": {}})
+    proj()["generations"].append(dict(gen))
+    store.log(proj(), f"AI 실행: {task} ({gen['model']})")
+    return gen.get("data") or {}
 
 
 def need_key_notice() -> bool:
@@ -84,9 +110,23 @@ def download_doc(blocks, basename: str, key: str, title: str = "문서") -> None
 
 
 def render_blocks(blocks) -> None:
+    import html as _html
     for kind, text in blocks:
+        if kind == "table":
+            import pandas as pd
+            hdr = text.get("header") or []
+            st.dataframe(pd.DataFrame(text.get("rows") or [], columns=hdr) if hdr else pd.DataFrame(), hide_index=True, width="stretch")
+            continue
         if kind == "title":
-            st.markdown(f"<div style='text-align:center;font-size:1.25rem;font-weight:600'>{text}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align:center;font-size:1.25rem;font-weight:600'>{_html.escape(text)}</div>", unsafe_allow_html=True)
+        elif kind == "h2":
+            st.markdown(f"**{text}**")
+        elif kind == "cap":
+            st.caption(f"**{text}**")
+        elif kind == "kw":
+            st.markdown(f"*{text}*")
+        elif kind == "ref":
+            st.caption(text)
         elif kind == "meta":
             st.caption(text)
         elif kind == "h":

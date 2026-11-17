@@ -1,9 +1,12 @@
 """보고서·계획서·원고 내보내기: Word(.docx), 한글(.hwpx), 결과표(Excel·CSV).
 
 모든 형식이 같은 blocks 목록에서 만들어지므로 내용과 참고문헌이 서로 달라지지 않는다 (REPORT-04).
-block = (kind, text)  kind: title | meta | h | p | b(굵은 머리말+본문은 'label|text')
+block = (kind, text)  kind: title | meta | h | h2 | p | b(굵은 머리말+본문은 'label|text') | cap(표 제목) | kw(주제어) | ref(참고문헌)
+                     | table(text 자리에 {"header":[...],"rows":[[...]]})
 """
 from __future__ import annotations
+
+FILE_VERSION = "3.2.0"
 
 import io
 import time
@@ -93,6 +96,7 @@ def report_blocks(proj: dict, pid: str, replicated: bool = False) -> list[tuple[
 
 
 def char_count(blocks) -> int:
+    blocks = [(k, t) for k, t in blocks if isinstance(t, str)]
     return sum(len(t.replace("|", " ")) for _, t in blocks)
 
 
@@ -132,6 +136,26 @@ def to_docx(blocks, font: str = "맑은 고딕") -> bytes:
             para(text, 9, False, WD_ALIGN_PARAGRAPH.CENTER, 8)
         elif kind == "h":
             para(text, 11.5, True, after=3).paragraph_format.space_before = Pt(8)
+        elif kind == "h2":
+            para(text, 10.5, True, after=2).paragraph_format.space_before = Pt(4)
+        elif kind == "cap":
+            para(text, 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, 2).paragraph_format.space_before = Pt(4)
+        elif kind == "kw":
+            para(text, 10, True, after=6)
+        elif kind == "ref":
+            para(text, 9.5, after=2)
+        elif kind == "table":
+            header, rows = text.get("header") or [], text.get("rows") or []
+            t = doc.add_table(rows=1 + len(rows), cols=len(header))
+            t.style = "Table Grid"
+            for r, row in enumerate([header] + rows):
+                for c, val in enumerate(row[:len(header)]):
+                    cell = t.cell(r, c)
+                    cell.text = ""
+                    run = cell.paragraphs[0].add_run(str(val))
+                    run.font.size, run.bold, run.font.name = Pt(9), r == 0, font
+                    run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
+            para(after=2)
         elif kind == "b":
             label, _, body = text.partition("|")
             p = para(after=3)
@@ -159,6 +183,43 @@ def _hp_runs(pid: int, runs: list[tuple[str, int]], para_pr: int = 0) -> str:
     return f'<hp:p id="{pid}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">{inner}</hp:p>'
 
 
+def _hp_table(pid: int, t: dict) -> tuple[str, int]:
+    """첫 행은 머리글(배경 borderFill 4, 굵게 9, 가운데 21), 나머지는 실선(3, 보통 0, 양쪽 22). 본문폭 42520."""
+    header, rows = t.get("header") or [], t.get("rows") or []
+    cols = max(1, len(header))
+    widths = [42520 // cols] * cols
+    widths[-1] += 42520 - sum(widths)
+    row_h = 2400
+    tbl_id, pid = pid, pid + 1
+    trs = []
+    for r, row in enumerate([header] + rows):
+        tcs = []
+        for c in range(cols):
+            val = str(row[c]) if c < len(row) else ""
+            head = r == 0
+            body = f"<hp:t>{escape(val)}</hp:t>" if val else "<hp:t/>"
+            tcs.append(
+                f'<hp:tc name="" header="{1 if head else 0}" hasMargin="1" protect="0" editable="0" dirty="1" borderFillIDRef="{4 if head else 3}">'
+                '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" '
+                'textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+                f'<hp:p paraPrIDRef="{21 if head else 22}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" id="{pid}">'
+                f'<hp:run charPrIDRef="{9 if head else 11}">{body}</hp:run></hp:p></hp:subList>'
+                f'<hp:cellAddr colAddr="{c}" rowAddr="{r}"/><hp:cellSpan colSpan="1" rowSpan="1"/>'
+                f'<hp:cellSz width="{widths[c]}" height="{row_h}"/><hp:cellMargin left="300" right="300" top="150" bottom="150"/></hp:tc>')
+            pid += 1
+        trs.append("<hp:tr>" + "".join(tcs) + "</hp:tr>")
+    n = len(trs)
+    xml = (f'<hp:p id="{pid}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">'
+           f'<hp:tbl id="{tbl_id}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" '
+           f'pageBreak="CELL" repeatHeader="1" rowCnt="{n}" colCnt="{cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">'
+           f'<hp:sz width="42520" widthRelTo="ABSOLUTE" height="{row_h * n}" heightRelTo="ABSOLUTE" protect="0"/>'
+           '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" '
+           'vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+           '<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+           + "".join(trs) + "</hp:tbl></hp:run></hp:p>")
+    return xml, pid + 1
+
+
 def to_hwpx(blocks, title: str = "논문 요약 보고서") -> bytes:
     """보고서 양식 header(글자: 12=16pt 굵게, 13=12pt 굵게, 9=10pt 굵게, 11=9pt / 문단: 20=가운데, 27=구획 머리말)를 쓴다."""
     base = (TPL / "Contents" / "section0.xml").read_text(encoding="utf-8")
@@ -171,6 +232,17 @@ def to_hwpx(blocks, title: str = "논문 요약 보고서") -> bytes:
             out.append(_hp(pid, text, 20, 11))
         elif kind == "h":
             out.append(_hp(pid, text, 27, 13))
+        elif kind == "h2":
+            out.append(_hp(pid, text, 0, 9))
+        elif kind == "cap":
+            out.append(_hp(pid, text, 20, 9))
+        elif kind == "kw":
+            out.append(_hp(pid, text, 0, 9))
+        elif kind == "ref":
+            out.append(_hp(pid, text, 0, 11))
+        elif kind == "table":
+            xml, pid = _hp_table(pid, text)
+            out.append(xml)
         elif kind == "b":
             label, _, body = text.partition("|")
             out.append(_hp_runs(pid, [(label + ": ", 9), (body, 0)]))
@@ -193,7 +265,7 @@ def to_hwpx(blocks, title: str = "논문 요약 보고서") -> bytes:
             elif rel == "Contents/content.hpf":
                 zf.writestr(rel, hpf)
             elif rel == "Preview/PrvText.txt":
-                zf.writestr(rel, "\n".join(t.replace("|", ": ") for _, t in blocks)[:1000])
+                zf.writestr(rel, "\n".join(t.replace("|", ": ") for k, t in blocks if isinstance(t, str))[:1000])
             else:
                 zf.write(path, rel)
     return buf.getvalue()

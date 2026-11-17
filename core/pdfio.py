@@ -1,6 +1,8 @@
 """PDF 텍스트 추출과 AI 전송 범위 구성 (READ-03~06). OCR과 그림 직접 분석은 지원하지 않는다."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import hashlib
 import re
 

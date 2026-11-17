@@ -1,6 +1,8 @@
 """06. 내 논문 작성 — 목차, 장별 초안, 인용·정합성 검토, 내보내기."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import json
 
 import streamlit as st

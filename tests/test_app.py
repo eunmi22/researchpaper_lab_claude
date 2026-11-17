@@ -199,3 +199,32 @@ def test_admin_gate_and_rule_only_run(monkeypatch):
     run = at.session_state.proj["eval"]["runs"][-1]
     cid = run["conditions"]["case_ids"][0]
     assert run["state"] == "완료" and run["rules"][cid]["형식 준수"]["state"] == "기준 미달" and not errors(at)
+
+
+def test_partial_deploy_is_reported_not_crashing(monkeypatch):
+    """배포 때 core/ai.py만 이전 버전으로 남은 경우: 화면이 멈추지 않고 원인을 알려 준다."""
+    at = app(monkeypatch)
+    assert not any("섞여 있습니다" in e.value for e in at.error)
+    search(at, monkeypatch, {1: S.response(1, [S.THESIS])})
+    click(at, "02. 논문 읽기 시작")
+    pid = at.session_state.current_pid
+    doc = pdfio.extract(open(PDF, "rb").read(), "rds.pdf")
+    at.session_state.texts[pid] = doc["pages"]
+    at.session_state.proj["docs"][pid] = {k: doc[k] for k in ("document_id", "name", "page_count", "empty_pages", "captions", "total_chars", "status")}
+    at.text_input(key="openai_key").set_value("sk-test-key-for-ui").run()
+
+    def old_run_task(api_key, model, task, material, extra=""):
+        return {"x": {}}[task]  # 이전 ai.py: TASKS에 'pages'가 없어 KeyError
+
+    monkeypatch.setattr(ai, "run_task", old_run_task)
+    click(at, "쪽별 요약 만들기")
+    assert not at.exception
+    assert any("서로 다른 버전으로 섞여" in e.value for e in at.error)
+    assert any("여기서 멈췄습니다" in w.value for w in at.warning)
+
+
+def test_stale_file_banner(monkeypatch):
+    import core.ai
+    monkeypatch.setattr(core.ai, "FILE_VERSION", "이전 버전")
+    at = app(monkeypatch)
+    assert any("core/ai.py (이전 버전)" in e.value for e in at.error)

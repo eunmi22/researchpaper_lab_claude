@@ -1,6 +1,8 @@
 """세션 보관·프로젝트 내보내기/복원 (DATA-01~07). 영구 저장이 아니다: 브라우저를 닫으면 사라지므로 JSON으로 내려받는다."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import copy
 import json
 import re
@@ -25,6 +27,7 @@ def new_project() -> dict:
         "generations": [],   # AI 실행 이력
         "comparison": {}, "ideas": [], "adopted": [], "plan": {}, "plan_log": [],
         "experiments": [], "manuscript": {}, "history": [],
+        "design": {},        # 나의 연구 설계안 (장별 인터뷰·초안·초록)
         "eval": {"cases": [], "runs": [], "reviews": [], "settings": {"threshold": 0.8, "max_cases": 30, "model": "gpt-4.1-mini"}},
     }
 
@@ -32,7 +35,7 @@ def new_project() -> dict:
 def empty_note() -> dict:
     return {"abstract": "", "summary6": {}, "summary7": {}, "method": {}, "ai_questions": [], "edited": {},
             "my_thoughts": "", "selection_reason": "", "extra_limits": "", "read_state": "읽기 전", "source_scope": "",
-            "page_notes": {}, "memos": {}, "chat": [], "questions3": {}}
+            "page_notes": {}, "memos": {}, "chat": [], "questions3": {}, "tutor": {}, "drafts": {}}
 
 
 def store_note_defaults() -> dict:

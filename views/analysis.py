@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import hashlib
 import io
 import time

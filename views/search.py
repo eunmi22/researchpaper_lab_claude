@@ -1,6 +1,8 @@
 """01. 자료 찾기 — 국회도서관 검색 / 대학 학위논문 / 기타 자료·통계."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 from urllib.parse import quote_plus
 
 import streamlit as st

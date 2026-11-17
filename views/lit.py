@@ -1,6 +1,8 @@
 """03. 선행연구 분석 — 논문별·논문 간 비교, 브레인스토밍, 연구 공백 후보."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import json
 
 import streamlit as st

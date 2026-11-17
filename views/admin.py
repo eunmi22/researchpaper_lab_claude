@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import hmac
 import io
 import json

@@ -1,12 +1,15 @@
 """04. 연구 방향·계획 — 주제 후보, RQ, 방법·평가 설계, 연구계획서."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import json
 import time
 
 import streamlit as st
 
 from core import cite, store
+from views import design as design_view
 from views.common import download_doc, need_key_notice, proj, render_blocks, run_ai
 
 FIELDS = ["제목", "배경·필요성", "선행연구·공백 후보", "목적·RQ", "방법·실험 설계", "평가 지표", "기대 기여(예상)", "일정", "제약"]
@@ -29,6 +32,14 @@ def plan_blocks() -> list:
 
 def render():
     st.header("04. 연구 방향·계획")
+    tabs = st.tabs(["연구계획서", "나의 연구 설계안 (Research Paper)"])
+    with tabs[0]:
+        _plan_tab()
+    with tabs[1]:
+        design_view.render_tab()
+
+
+def _plan_tab():
     info = proj()["project"]
     with st.form("proj_info"):
         st.markdown("**연구 조건** (모르는 칸은 비워 두면 ‘확인 필요’로 처리합니다)")

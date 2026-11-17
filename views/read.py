@@ -1,14 +1,17 @@
 """02. 논문 읽기 — 원문 준비, 6항목·7문장 요약, 기여도·증명방법, 나의 생각, A4 과제 보고서."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 import uuid
 
 import streamlit as st
 
 import re
 
-from core import ai, cite, evalq, exporters, nanet, pdfio, reporttpl, store
-from views.common import download_doc, goto, need_key_notice, pick_paper, proj, render_blocks, run_ai
+from core import ai, cite, evalq, exporters, nanet, pdfio, reporttpl, store, tutor
+from views import tutor as tutor_view
+from views.common import download_doc, goto, need_key_notice, pick_paper, proj, render_blocks, run_ai, run_prompt
 
 READ_STATES = ["읽기 전", "초록만 읽음", "본문 읽는 중", "끝까지 읽음"]
 PAGE_KINDS = ["본문", "표지·목차", "참고문헌·부록"]
@@ -16,6 +19,49 @@ SUGGEST = ["이 논문의 연구 방법을 단계별로 쉽게 설명해 줘", "
 MY_FIELDS = [("reason", "selection_reason", "선정 이유", "선정 이유", 80),
              ("th", "my_thoughts", "이 논문을 읽고 든 생각과 의문", "생각과 의문", 130),
              ("extra", "extra_limits", "내가 추가로 검토할 점", "추가 검토점", 80)]
+FIELD_LEN = {"reason": "3~4문장", "th": "4~6문장", "extra": "2~3문장"}
+
+
+# ---------- AI 문장 완성 (미리보기 → 사용 → 되돌리기) ----------
+def _use_draft(widget_key: str, drafts: dict, dkey: str) -> None:
+    text = (drafts.get(dkey) or {}).get("text", "")
+    drafts[dkey] = {"text": "", "prev": st.session_state.get(widget_key, "")}
+    st.session_state[widget_key] = text
+
+
+def _undo_draft(widget_key: str, drafts: dict, dkey: str) -> None:
+    st.session_state[widget_key] = (drafts.get(dkey) or {}).get("prev") or ""
+    drafts[dkey] = {}
+
+
+def _drop_draft(drafts: dict, dkey: str) -> None:
+    drafts[dkey] = {"text": "", "prev": (drafts.get(dkey) or {}).get("prev")}
+
+
+def _draft_box(pid: str, note: dict, dkey: str, widget_key: str, what: str, length: str, material: str, hints: str = "",
+               label: str = "AI로 문장 완성") -> None:
+    """직접 쓴 메모를 문장으로 다듬어 미리 보여 준다. ‘사용’을 눌러야 칸에 들어가고, 넣은 뒤에도 되돌릴 수 있다."""
+    drafts = note.setdefault("drafts", {})
+    d = drafts.get(dkey) or {}
+    memo = str(st.session_state.get(widget_key, "")).strip()
+    c = st.columns([1, 3], vertical_alignment="center")
+    if c[0].button(label, key=f"pol_{widget_key}", disabled=not (memo and material and st.session_state.get("openai_key")),
+                   help="칸에 직접 쓴 메모를 바탕으로 문장을 다듬습니다. 메모가 비어 있으면 누를 수 없습니다."):
+        r = run_prompt(tutor.WRITER_SYSTEM, tutor.polish_prompt(what, length, memo, material, hints), "polish", "문장을 다듬는 중…", pid)
+        if r and str(r.get("text") or "").strip():
+            drafts[dkey] = {"text": str(r["text"]).strip(), "prev": d.get("prev")}
+            st.rerun()
+    if d.get("prev") is not None and not d.get("text"):
+        c[1].button("AI 문장 넣기 전으로 되돌리기", key=f"undo_{widget_key}", on_click=_undo_draft, args=(widget_key, drafts, dkey))
+    elif not d.get("text"):
+        c[1].caption("메모에 없는 경험·주장은 만들지 않습니다. 결과는 미리 보고 고를 수 있습니다.")
+    if d.get("text"):
+        with st.container(border=True):
+            st.caption("AI가 다듬은 문장 (아직 칸에 넣지 않았습니다)")
+            st.write(d["text"])
+            b = st.columns(2)
+            b[0].button("이 문장 사용", key=f"use_{widget_key}", type="primary", on_click=_use_draft, args=(widget_key, drafts, dkey), width="stretch")
+            b[1].button("버리기", key=f"drop_{widget_key}", on_click=_drop_draft, args=(drafts, dkey), width="stretch")
 
 
 def _register_direct():
@@ -57,9 +103,11 @@ def _source(pid: str, note: dict) -> tuple[str, dict]:
         else:
             old = proj()["docs"].get(pid, {}).get("document_id")
             st.session_state.texts[pid] = doc["pages"]
+            st.session_state.setdefault("pdfs", {})[pid] = up.getvalue()
             proj()["docs"][pid] = {k: doc[k] for k in ("document_id", "name", "page_count", "empty_pages", "captions", "total_chars", "status")} | {"upload_id": up.file_id}
             if old and old != doc["document_id"]:
-                st.warning("다른 PDF로 바뀌었습니다. 이전 PDF로 만든 요약은 아래에 ‘이전 원문 기준’으로 표시됩니다.")
+                st.warning("다른 PDF로 바뀌었습니다. 이전 PDF로 만든 요약은 아래에 ‘이전 원문 기준’으로 표시됩니다. 페이지별 읽기는 새 PDF로 다시 시작합니다.")
+                note["tutor"] = {}
             store.log(proj(), f"원문 등록: {up.name} ({doc['page_count']}쪽)")
     doc, pages = proj()["docs"].get(pid), st.session_state.texts.get(pid)
     if doc and not pages:
@@ -135,7 +183,8 @@ def _pages_run(pid: str, note: dict, pages: list[str], scope: dict) -> None:
                 continue
             if n in chunk:
                 notes[str(n)] = {"kind": it.get("kind") if it.get("kind") in PAGE_KINDS else "본문", "summary": str(it.get("summary") or ""),
-                                 "terms": [str(x) for x in (it.get("terms") or [])][:3], "question": str(it.get("question") or ""), "quote": str(it.get("quote") or "")}
+                                 "terms": [str(x) for x in (it.get("terms") or [])][:3], "question": str(it.get("question") or ""),
+                                 "answer": str(it.get("answer") or ""), "quote": str(it.get("quote") or "")}
     bar.empty()
     left = len(pages) - len(notes)
     if left:
@@ -199,12 +248,29 @@ def _pages_tab(pid: str, note: dict, scope: dict) -> None:
                 st.caption(" · ".join(it["terms"]))
             if it.get("question"):
                 st.markdown(f"**생각해 볼 점** · {it['question']}")
+                done = bool(((note.get("tutor") or {}).get("pages") or {}).get(n, {}).get("done"))
+                if it.get("answer"):
+                    with st.expander("생각해 본 뒤 답 보기", expanded=done):
+                        st.write(it["answer"])
+                        if it.get("aquote"):
+                            st.caption(f"근거: “{it['aquote']}”")
+                elif pages and st.session_state.get("openai_key"):
+                    if st.button("논문 근거로 답 보기", key=f"pans_{pid}_{n}"):
+                        r = run_prompt(tutor.TUTOR_SYSTEM, tutor.page_answer_prompt(int(n), pages[int(n) - 1], it["question"]), "page_answer",
+                                       "답을 찾는 중…", pid)
+                        if r and str(r.get("answer") or "").strip():
+                            it["answer"], it["aquote"] = str(r["answer"]), str(r.get("quote") or "")
+                            st.rerun()
             if it.get("kind") == "본문":
                 key = f"memo_{pid}_{n}"
                 if key not in st.session_state:
                     st.session_state[key] = memos.get(n, "")
                 st.text_area(f"p.{n}을 읽고 든 생각", key=key, height=68, placeholder="이 쪽을 읽고 든 생각 (선택)", label_visibility="collapsed")
                 memos[n] = st.session_state[key]
+                if str(memos[n]).strip():
+                    ptxt = pages[int(n) - 1][:3500] if pages else ""
+                    mat = f"[PDF p.{n} 요약] {it.get('summary', '')}\n[생각해 볼 점] {it.get('question', '')}\n[답] {it.get('answer', '')}\n\n[PDF p.{n} 원문]\n{ptxt}"
+                    _draft_box(pid, note, f"memo:{n}", key, f"p.{n}에 대한 나의 생각", "2~3문장", mat)
 
 
 def _fmt(text: str) -> str:
@@ -253,14 +319,16 @@ def _chat_tab(pid: str, note: dict, material: str) -> None:
 
 def _ai_section(pid: str, note: dict, material: str, scope: dict):
     st.subheader("② AI 사전 요약 (직접 읽기 전 길잡이)")
-    st.caption("먼저 쪽별 요약으로 논문 흐름을 훑고, 쪽마다 떠오른 생각을 적어 두세요. 궁금한 점은 ‘논문에 질문하기’에서 바로 물어볼 수 있습니다.")
+    st.caption("‘페이지별 읽기’에서 원문 쪽을 직접 읽고 요약하거나, ‘쪽별 요약’으로 흐름을 훑고 쪽마다 생각을 적어 두세요. 궁금한 점은 ‘논문에 질문하기’에서 물어볼 수 있습니다.")
     ready = need_key_notice() and bool(material)
-    tabs = st.tabs(["쪽별 요약", "논문에 질문하기", "과제용 6항목", "읽기용 7문장", "기여도·증명방법·한계"])
+    tabs = st.tabs(["페이지별 읽기", "쪽별 요약", "논문에 질문하기", "과제용 6항목", "읽기용 7문장", "기여도·증명방법·한계"])
     with tabs[0]:
-        _pages_tab(pid, note, scope)
+        tutor_view.render_tab(pid, note)
     with tabs[1]:
+        _pages_tab(pid, note, scope)
+    with tabs[2]:
         _chat_tab(pid, note, material)
-    for tab, task, label in ((tabs[2], "summary6", "6항목 요약 만들기"), (tabs[3], "summary7", "7문장 요약 만들기")):
+    for tab, task, label in ((tabs[3], "summary6", "6항목 요약 만들기"), (tabs[4], "summary7", "7문장 요약 만들기")):
         with tab:
             if st.button(label, key=f"{task}_{pid}", disabled=not ready):
                 gen = run_ai(task, material, pid=pid, context=scope)
@@ -273,7 +341,7 @@ def _ai_section(pid: str, note: dict, material: str, scope: dict):
                     res = evalq.rule_checks(case, st.session_state.texts.get(pid))
                     st.dataframe([{"검사": k, "판정": v["state"], "설명": v["detail"]} for k, v in res.items()], hide_index=True, width="stretch")
                     st.caption("규칙 검사는 형식과 문구 일치만 봅니다. 내용이 논문의 뜻과 맞는지는 직접 읽고 확인해 주세요.")
-    with tabs[4]:
+    with tabs[5]:
         if st.button("기여도·증명방법 분석하기", key=f"method_{pid}", disabled=not ready):
             gen = run_ai("method", material, pid=pid, context=scope)
             if gen:
@@ -306,8 +374,11 @@ def _thoughts(pid: str, note: dict, material: str, scope: dict):
                         out.append({"q": str(o["q"]).strip(), "pages": [p for p in (o.get("pages") or []) if str(p).isdigit()]})
                 return out[:4]
             note["questions3"] = {k: pick(k) for _, _, _, k, _ in MY_FIELDS}
-    c2.caption("세 칸마다 생각을 시작할 실마리 질문을 보여 줍니다. 질문에 대한 답은 본인 경험과 판단으로 직접 쓰세요. AI는 이 칸들을 채우거나 고치지 않습니다.")
+    c2.caption("세 칸마다 생각을 시작할 실마리 질문을 보여 줍니다. 먼저 본인 경험과 판단을 메모로 적고, 원하면 ‘AI로 완성하기’로 문장을 다듬으세요. "
+               "AI 문장은 미리 보고 ‘사용’을 눌러야 칸에 들어갑니다.")
     q3 = note.get("questions3") or {}
+    body = [(n, v) for n, v in sorted((note.get("page_notes") or {}).items(), key=lambda x: int(x[0])) if v.get("kind") == "본문"]
+    field_mat = ("[쪽별 요약]\n" + "\n".join(f"[PDF p.{n}] {v['summary']}" for n, v in body)) if len(body) >= 5 else (material or "")[:30000]
     for prefix, nkey, label, qkey, height in MY_FIELDS:
         key = f"{prefix}_{pid}"
         if key not in st.session_state:
@@ -315,6 +386,7 @@ def _thoughts(pid: str, note: dict, material: str, scope: dict):
         st.text_area(label, key=key, height=height)
         note[nkey] = st.session_state[key]
         qs = q3.get(qkey) or []
+        _draft_box(pid, note, f"field:{prefix}", key, label, FIELD_LEN[prefix], field_mat, "\n".join(o["q"] for o in qs), "AI로 완성하기")
         if qs:
             with st.container(border=True):
                 st.caption("실마리 질문 (참고용)")
@@ -367,6 +439,18 @@ def _report(pid: str, note: dict):
               "scope": "검증 범위·한계 (1문장)", "limits": "논문에 명시된 한계"}
     sec_of = {"overview": "overview", "tech": "tech", "contribution": "three", "proof": "three", "scope": "three", "limits": "limits"}
     shown = {k: lab for k, lab in labels.items() if sec_of[k] in on}
+    if "overview" in shown:
+        done = sorted((int(k), v["done_summary"]) for k, v in ((note.get("tutor") or {}).get("pages") or {}).items()
+                      if v.get("done") and str(v.get("done_summary") or "").strip())
+        c1, c2 = st.columns([2, 3], vertical_alignment="center")
+        if c1.button("페이지별 읽기에서 끝낸 내 요약으로 연구 개요 만들기", key=f"ovw_{pid}", disabled=not (done and st.session_state.get("openai_key"))):
+            r = run_prompt(tutor.WRITER_SYSTEM, tutor.overview_prompt(cite.format_citation(proj()["papers"][pid]),
+                                                                       "\n".join(f"[PDF p.{n}] {t}" for n, t in done)), "overview", "연구 개요를 만드는 중…", pid)
+            if r and str(r.get("text") or "").strip():
+                note.setdefault("edited", {})["overview"] = str(r["text"]).strip()
+                store.log(proj(), "연구 개요: 페이지별 요약으로 작성")
+                st.rerun()
+        c2.caption(f"페이지별 읽기에서 끝낸 요약 {len(done)}쪽" + (" · 아래 ‘연구 개요’ 칸에 들어가며 고쳐 쓸 수 있습니다." if done else " · 먼저 ② 페이지별 읽기에서 쪽 요약을 끝내 주세요."))
     with st.form(f"report_{pid}"):
         st.caption("AI 초안을 고쳐 쓰세요. 고친 내용은 AI 초안과 따로 보관합니다. 선정 이유·나의 생각·추가 검토점은 ③에서 씁니다.")
         vals = {k: st.text_area(lab, f[k], height=70) for k, lab in shown.items()}
@@ -443,6 +527,7 @@ def render():
     _thoughts(pid, note, material, scope)
     _report(pid, note)
     st.divider()
+    st.caption("보고서를 마쳤다면 04. 연구 방향·계획의 ‘나의 연구 설계안’ 탭에서 장별 인터뷰로 Research Paper 초안을 만들 수 있습니다.")
     if st.button("03. 선행연구 분석으로 보내기", help="서지정보, 요약, 근거, 나의 생각을 함께 넘깁니다."):
         note["in_lit"] = True
         goto("03. 선행연구 분석")

@@ -6,9 +6,28 @@ from __future__ import annotations
 
 import streamlit as st
 
+import importlib
+
 from core import ai, store
 from core.version import APP_VERSION, BUILD_ID
 from views import common
+
+EXPECTED_VERSION = "3.2.0"  # 이 app.py와 함께 배포되어야 하는 파일 버전
+_FILES = ["core.ai", "core.cite", "core.evalq", "core.exporters", "core.nanet", "core.pdfio", "core.reporttpl", "core.store", "core.tutor", "core.design",
+          "views.common", "views.search", "views.read", "views.tutor", "views.design", "views.lit", "views.plan", "views.analysis", "views.write", "views.admin"]
+
+
+def _stale_files() -> list[str]:
+    """배포할 때 일부 파일만 바뀌면 화면 중간에 알 수 없는 오류가 난다. 시작할 때 버전이 다른 파일을 찾아 알린다."""
+    out = [] if APP_VERSION == EXPECTED_VERSION else ["core/version.py"]
+    for name in _FILES:
+        try:
+            got = getattr(importlib.import_module(name), "FILE_VERSION", "이전 버전")
+        except Exception:
+            got = "불러오기 실패"
+        if got != EXPECTED_VERSION:
+            out.append(f"{name.replace('.', '/')}.py ({got})")
+    return out
 
 st.set_page_config(page_title="대학원 AI 논문 연구 도우미", page_icon="🎓", layout="wide")
 
@@ -16,6 +35,7 @@ ss = st.session_state
 if "proj" not in ss:
     ss.proj = store.new_project()
     ss.texts = {}        # paper_id → 추출한 쪽별 본문 (세션에만 둠)
+    ss.pdfs = {}         # paper_id → 올린 PDF 원본 바이트 (페이지별 읽기 화면용, 세션에만 둠)
     ss.run = None        # 최근 검색 실행
     ss.menu = common.MENUS[0]
 if "_goto" in ss:
@@ -44,7 +64,7 @@ with st.sidebar:
         if up is not None and st.button("불러와서 현재 작업 바꾸기", help="현재 세션의 작업이 불러온 파일 내용으로 바뀝니다."):
             try:
                 ss.proj, notes = store.import_project(up.getvalue())
-                ss.texts, ss.run = {}, None
+                ss.texts, ss.pdfs, ss.run = {}, {}, None
                 for k in [k for k in ss if isinstance(k, str) and k.startswith(("th_", "reason_", "extra_", "memo_", "tpl_"))]:
                     del ss[k]
                 ss._import_notes = notes
@@ -56,6 +76,11 @@ with st.sidebar:
     with st.expander("이용 안내"):
         st.caption("AI는 논문 읽기를 돕는 초안을 만듭니다. 연구 결과나 본인의 의견을 대신 만들지 않으며, 제출 전 내용은 반드시 직접 확인해 주세요. "
                    "AI 기능을 쓰면 선택한 논문 본문이 OpenAI로 전송됩니다.")
+
+_stale = _stale_files()
+if _stale:
+    st.error("앱 파일이 서로 다른 버전으로 섞여 있습니다. 아래 파일이 새 버전(" + EXPECTED_VERSION + ")이 아닙니다: "
+             + ", ".join(_stale) + ". GitHub에 새 압축 파일의 모든 파일을 올린 뒤 Manage app → Reboot app을 눌러 주세요.")
 
 st.title("대학원 AI 논문 연구 도우미")
 st.caption("자료 찾기 → 논문 읽기 → 선행연구 분석 → 연구 방향·계획 → 연구 수행·분석 → 내 논문 작성")

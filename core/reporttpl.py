@@ -1,6 +1,8 @@
 """A4 보고서 양식: 항목 켜기·끄기, 순서, 제목. 모든 논문에 함께 적용한다 (프로젝트 설정)."""
 from __future__ import annotations
 
+FILE_VERSION = "3.2.0"
+
 SEC_DEF = {"cite": "서지정보", "reason": "선정 이유", "overview": "연구 개요", "tech": "활용 기술·분석 대상",
            "three": "연구 기여도와 증명방법 (핵심 3줄)", "limits": "한계", "s7": "논문 요약 (7문장)",
            "replication": "따라 해 보기 검토", "thoughts": "나의 생각·의문"}
